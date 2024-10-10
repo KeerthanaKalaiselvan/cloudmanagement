@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 50px;
+        }
+
+        .btn-container {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 8px;
+            font-size: 10px;
+            border: none;
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .btn i {
+            margin-right: 10px;
+        }
+
+        .btn.delete {
+            background-color: #f44336;
+        }
+
+        .btn.download {
+            background-color: #2196F3;
+        }
+
+        table {
+            width: 80%;
+            margin: auto;
+            border-collapse: collapse;
+        }
+
+        table,
+        th,
+        td {
+            border: 1px solid black;
+            padding: 10px;
+        }
+
+        th,
+        td {
+            text-align: left;
+        }
+
+        .action-btn {
+            display: flex;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Welcome, <span id="username"></span>!</h1>
+<!-- Folder Creation Form -->
+<h2>Create New Folder</h2>
+<form id="create-folder-form">
+    <input type="text" id="new-folder-name" placeholder="Folder Name" required>
+    <button type="button" onclick="createFolder()">Create Folder</button>
+</form>
+
+    <!-- File Upload Form -->
+    <h2>Upload File to Folder</h2>
+    <form id="file-upload-form" enctype="multipart/form-data">
+        <label for="file">Select File:</label>
+        <input type="file" id="file" name="file" required><br>
+    
+        <label for="folder-select">Select Folder:</label>
+        <select id="folder-select" name="folderId" required>
+            <option value="">--Select Folder--</option>
+            <!-- Folders will be dynamically populated -->
+        </select><br>
+    
+        <button type="submit">Upload File</button>
+    </form>
+
+    <h2>Your Files</h2>
+    <table id="files-table">
+        <thead>
+            <tr>
+                <th>File Name</th>
+                <th>Size</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Files will be dynamically inserted here -->
+        </tbody>
+    </table>
+
+    <table id="files-table-folder">
+        <thead>
+            <tr>
+                <th>Folder Name</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Folders will be dynamically inserted here -->
+        </tbody>
+    </table>
+
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        socket.on('file-uploaded', (data) => {
+            alert(`File uploaded: ${data.filename}`);
+        });
+
+        socket.on('file-download-started', (data) => {
+            alert(`File download started: ${data.filename}`);
+        });
+
+        socket.on('file-deleted', (data) => {
+            alert(`File deleted: ${data.filename}`);
+        });
+
+       document.addEventListener('DOMContentLoaded', function () {
+            fetch('/api/user')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('username').textContent = data.username;
+                })
+                .catch(error => console.error('Error fetching user data:', error));
+
+            // Fetch folders and display them
+            fetch('/folders')
+                .then(response => response.json())
+                .then(data => {
+                     const folderSelect = document.getElementById('folder-select');
+                    const filesTableBody = document.getElementById('files-table-folder').querySelector('tbody');
+                    if (data.success && data.folders.length > 0) {
+                        data.folders.forEach(folder => {
+                            const option = document.createElement('option');
+                            option.value = folder._id;
+                            option.textContent = folder.name;
+                            folderSelect.appendChild(option);
+                            const folderRow = document.createElement('tr');
+                            folderRow.innerHTML = `
+                            <td><strong>${folder.name}</strong></td>
+                            <td>
+                                <div class="action-btn">
+                                    <button class="btn download" onclick="downloadFolder('${folder._id}')"><i class="fas fa-download"></i> Download</button>
+                                    <button class="btn delete" onclick="deleteFolder('${folder._id}')"><i class="fas fa-trash-alt"></i> Delete</button>
+                                </div>
+                            </td>
+                        `;
+                            filesTableBody.appendChild(folderRow);
+                        });
+                    } else {
+                        alert('No folders found.');
+                    }
+                })
+                .catch(error => console.error('Error fetching folders:', error));
+
+            // Fetch files and display them
+            fetch('/files')
+                .then(response => response.json())
+                .then(data => {
+                    const filesTableBody = document.getElementById('files-table').querySelector('tbody');
+                    if (data.success && data.files.length > 0) {
+                        data.files.forEach(file => {
+                            const row = document.createElement('tr');
+                            row.innerHTML = `
+                            <td>${file.key}</td>
+                            <td>${(file.size / 1024).toFixed(2)} KB</td>
+                            <td>
+                                <div class="action-btn">
+                                    <button class="btn download" onclick="downloadFile('${file.key}')"><i class="fas fa-download"></i> Download</button>
+                                    <button class="btn delete" onclick="deleteFile('${file.key}')"><i class="fas fa-trash-alt"></i> Delete</button>
+                                </div>
+                            </td>
+                        `;
+                            filesTableBody.appendChild(row);
+                        });
+                    } else {
+                        alert('No files found.');
+                    }
+                })
+                .catch(error => console.error('Error fetching files:', error));
+        });
+          // Handle folder creation
+            function createFolder () {
+                const folderName = document.getElementById('new-folder-name').value;
+                if (!folderName) return alert('Please enter a folder name.');
+
+                fetch('/folders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: folderName })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert('Folder created successfully!');
+                            window.location.reload(); // Reload to show new folder
+                        } else {
+                            alert('Error creating folder.');
+                        }
+                    });
+            }
+
+    // Handle file upload
+    document.getElementById('file-upload-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        const formData = new FormData(this);
+        fetch('/upload', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('File uploaded successfully!');
+                    window.location.reload(); // Reload to display new file
+                } else {
+                    alert('Error uploading file.');
+                }
+            });
+    });
+
+        function deleteFile (fileKey) {
+            fetch(`/files/delete/${fileKey}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('File deleted successfully.');
+                        window.location.reload();
+                    } else {
+                        alert('Error deleting file.');
+                    }
+                });
+        }
+
+        function downloadFile (fileKey) {
+            const downloadUrl = `/files/download/${fileKey}`;
+            window.location.href = downloadUrl;
+        }
+
+        function deleteFolder (folderId) {
+            fetch(`/folders/delete/${folderId}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Folder deleted successfully.');
+                        window.location.reload();
+                    } else {
+                        alert('Error deleting folder.');
+                    }
+                });
+        }
+
+        function downloadFolder (folderId) {
+            const downloadUrl = `/folders/download/${folderId}`;
+            window.location.href = downloadUrl;
+        }
+    </script>
+</body>
+</html>
