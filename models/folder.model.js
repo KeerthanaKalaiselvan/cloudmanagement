@@ -15,6 +15,10 @@ const folderSchema = new Schema({
         type: String,
         required: true,
     },
+    files: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'File'  // Reference to the File model
+    }],
     createdAt: {
         type: Date,
         default: Date.now,

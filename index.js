@@ -15,7 +15,7 @@ const cron = require('node-cron');
 const fs = require('fs');
 const { cleanupOldZipFiles } = require('./cleanup'); // Import the cleanup function
 const { Folder } = require('./models/folder.model');
-
+const AdmZip = require('adm-zip');
 const { Upload } = require('@aws-sdk/lib-storage');
 
 const { S3Client, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
@@ -172,8 +172,8 @@ app.post("/upload", upload.single('file'), ensureAuthenticated, async (req, res)
     try {
         const { file } = req;
         const userGoogleId = req.user.id;  // Get googleId from the authenticated user
-        // const folderId = req.body.folderId ;  // Folder from the request, or default
-        
+        const folderId = req.body.folderId;  // Folder ID from the request body
+
         const uploadParams = {
             Bucket: process.env.AWS_BUCKET_NAME,
             Key: `${Date.now()}-${file.originalname}`,  // File path in S3
@@ -187,26 +187,35 @@ app.post("/upload", upload.single('file'), ensureAuthenticated, async (req, res)
             params: uploadParams,
         }).done();
 
-        // Save metadata in MongoDB with googleId
+        // Save file metadata in MongoDB
         const newFile = new File({
             filename: file.originalname,
             url: uploadResult.Location,  // S3 file URL
             size: file.size,
-            folderId: req.body.folderId,
-            googleId: userGoogleId,   // Save the googleId of the user uploading the file
-            key:uploadParams.Key,
+            folderId: folderId,  // Store the folder ID
+            googleId: userGoogleId,  // Save the googleId of the user uploading the file
+            key: uploadParams.Key,  // Save the file key
         });
 
         await newFile.save();
+
+        // *** Update the Folder with the new file reference ***
+        await Folder.findByIdAndUpdate(
+            folderId,
+            { $push: { files: newFile._id } },  // Push the file ID into the folder's `files` array
+            { new: true }
+        );
+
+        // Notify via socket
         io.emit('file-uploaded', { filename: file.originalname });
-        // res.json({ success: true, file: newFile });
-        res.redirect("/profile")
+
+        // Redirect to profile
+        res.redirect("/profile");
     } catch (error) {
         console.error('Error uploading file:', error);
         res.status(500).json({ error: 'Error uploading file' });
     }
 });
-
 
 app.get("/files", ensureAuthenticated, async (req, res) => {
 const userGoogleId = req.user.id;  // Get googleId from authenticated user
@@ -333,14 +342,15 @@ app.delete('/folders/delete/:folderId', async (req, res) => {
         }
 
         // Optionally, delete files from the file system
-        folder.files.forEach(file => {
-            const filePath = path.join(__dirname, 'uploads', file); // Adjust path as needed
-            fs.unlink(filePath, (err) => {
-                if (err) {
-                    console.error(`Error deleting file: ${filePath}`, err);
-                }
-            });
-        });
+        // folder.files.forEach(file => {
+        //     console.log(file);
+        //     const filePath = path.join(__dirname, 'uploads', file); // Adjust path as needed
+        //     fs.unlink(filePath, (err) => {
+        //         if (err) {
+        //             console.error(`Error deleting file: ${filePath}`, err);
+        //         }
+        //     });
+        // });
 
         // Delete the folder from the database
         await Folder.findByIdAndDelete(folderId);
@@ -356,40 +366,83 @@ app.get('/folders/download/:folderId', async (req, res) => {
 
     try {
         // Find the folder by ID
-        const folder = await Folder.findById(folderId);
+       
+        const folder = await Folder.findById(folderId).populate('files');
         if (!folder) {
             return res.status(404).json({ success: false, message: 'Folder not found' });
         }
 
-        // Check if folder.files exists and is an array
+        // Ensure the folder has files to download
         if (!Array.isArray(folder.files) || folder.files.length === 0) {
             return res.status(400).json({ success: false, message: 'No files found in this folder.' });
         }
 
-        // Create a ZIP file from the folder's files
-        const zip = require('adm-zip');
+        // Create a temporary directory if it doesn't exist
+        const tempDir = path.join(__dirname, 'temp');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir);
+        }
+
+        // Create a new ZIP archive using adm-zip
+        const zip = new AdmZip();
+
+        // Iterate over files in the folder
+        for (const file of folder.files) {
+            const params = {
+                Bucket: process.env.AWS_BUCKET_NAME, // Your S3 bucket name
+                Key: file.key // S3 file key (stored in MongoDB)
+            };
+
+            // Get the file from S3
+            const command = new GetObjectCommand(params);
+            const fileStream = await s3Client.send(command).then(response => response.Body);
+
+            // Store the file temporarily on the local system
+            const tempFilePath = path.join(tempDir, file.filename);
+            const tempFileWriteStream = fs.createWriteStream(tempFilePath);
+
+            // Pipe the S3 stream to a local file
+            fileStream.pipe(tempFileWriteStream);
+
+            // Wait until the file is fully written before adding to ZIP
+            await new Promise((resolve, reject) => {
+                tempFileWriteStream.on('finish', () => {
+                    // Add the local file to the ZIP archive
+                    zip.addLocalFile(tempFilePath);
+                    resolve();
+                });
+                tempFileWriteStream.on('error', reject);
+            });
+        }
+
+        // Specify the zip file path
         const zipFilePath = path.join(__dirname, 'downloads', `${folder.name}.zip`);
-        const archive = new zip();
+        zip.writeZip(zipFilePath);
 
-        folder.files.forEach(file => {
-            const filePath = path.join(__dirname, 'uploads', file); // Adjust the path as needed
-            archive.addLocalFile(filePath);
-        });
-
-        archive.writeZip(zipFilePath);
-
-        // Send the ZIP file to the user
+        // Send the ZIP file to the client for download
         res.download(zipFilePath, `${folder.name}.zip`, (err) => {
             if (err) {
-                console.error('Error downloading ZIP file:', err);
+                console.error('Error during ZIP download:', err);
             }
-            // Optionally, delete the ZIP file after download
+
+            // Optionally, clean up the temp ZIP file after download
             fs.unlink(zipFilePath, (err) => {
                 if (err) {
                     console.error(`Error deleting ZIP file: ${zipFilePath}`, err);
                 }
             });
+
+            // Optionally, delete the temporary files stored locally
+            folder.files.forEach(file => {
+                const tempFilePath = path.join(tempDir, file.filename);
+                fs.unlink(tempFilePath, (err) => {
+                    if (err) {
+                        console.error(`Error deleting temporary file: ${tempFilePath}`, err);
+                    }
+                });
+            });
         });
+
     } catch (error) {
         console.error('Error downloading folder:', error);
         res.status(500).json({ success: false, message: 'Error downloading folder.' });
