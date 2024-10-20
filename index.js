@@ -241,26 +241,31 @@ app.delete('/files/delete/:fileKey', ensureAuthenticated, async (req, res) => {
     const fileKey = req.params.fileKey;
 
     try {
+        // Check if the file exists in the database
+        const file = await File.findOne({ key: fileKey });
+        if (!file) {
+            return res.status(404).json({ success: false, message: 'File not found in database' });
+        }
+
+        // Create a DeleteObjectCommand for S3
         const params = {
             Bucket: process.env.AWS_BUCKET_NAME,
-            Key: fileKey,  // Use the file key from the request
+            Key: fileKey,
         };
 
-        // Create a DeleteObjectCommand
-        const command = new DeleteObjectCommand(params);
+        // Delete the file from S3
+        await s3Client.send(new DeleteObjectCommand(params));
 
-        // Send the command using the s3Client
-        await s3Client.send(command);
-
-        // Also delete file metadata from MongoDB
+        // Delete the file metadata from MongoDB
         await File.deleteOne({ key: fileKey });
+
         // Emit notification for file delete
         io.emit('Removing the file', { filename: fileKey });
-res.json({ success: true });
-        
+        res.json({ success: true, message: 'File deleted successfully' });
+
     } catch (error) {
         console.error('Error deleting file:', error);
-        res.status(500).json({ error: 'Error deleting file' });
+        res.status(500).json({ error: 'Error deleting file', details: error.message });
     }
 });
 app.get('/files/download/:fileKey', ensureAuthenticated, async (req, res) => {
@@ -336,30 +341,34 @@ app.delete('/folders/delete/:folderId', async (req, res) => {
 
     try {
         // Find the folder by ID
-        const folder = await Folder.findById(folderId);
+        const folder = await Folder.findById(folderId).populate('files'); // Assuming files are linked via a 'files' field
         if (!folder) {
             return res.status(404).json({ success: false, message: 'Folder not found' });
         }
 
-        // Optionally, delete files from the file system
-        // folder.files.forEach(file => {
-        //     console.log(file);
-        //     const filePath = path.join(__dirname, 'uploads', file); // Adjust path as needed
-        //     fs.unlink(filePath, (err) => {
-        //         if (err) {
-        //             console.error(`Error deleting file: ${filePath}`, err);
-        //         }
-        //     });
-        // });
+        // Loop through and delete files (from file system or S3, and database)
+        for (const file of folder.files) {
+            // Delete file from S3 using S3Client
+            const deleteParams = {
+                Bucket: process.env.AWS_BUCKET_NAME,
+                Key: file.key,  // Assuming 'key' is the S3 file key
+            };
+            await s3Client.send(new DeleteObjectCommand(deleteParams));
+
+            // Delete file record from the database
+            await File.findByIdAndDelete(file._id);
+        }
 
         // Delete the folder from the database
         await Folder.findByIdAndDelete(folderId);
-        res.json({ success: true, message: 'Folder deleted successfully.' });
+
+        res.json({ success: true, message: 'Folder and its files deleted successfully.' });
     } catch (error) {
         console.error('Error deleting folder:', error);
-        res.status(500).json({ success: false, message: 'Error deleting folder.' });
+        res.status(500).json({ success: false, message: 'Error deleting folder and its files.' });
     }
 });
+
 
 app.get('/folders/download/:folderId', async (req, res) => {
     const { folderId } = req.params;
